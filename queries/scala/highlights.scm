@@ -5,7 +5,7 @@
 (identifier) @variable
 
 ((identifier) @variable.builtin
- (#match? @variable.builtin "^this$"))
+ (#lua-match? @variable.builtin "^this$"))
 
 (interpolation) @none
 
@@ -16,7 +16,7 @@
 ; an uppercased method as a constant if used with no params.
 ; Introducing highlighting for those specific cases, is probably
 ; best way to resolve the issue.
-((identifier) @constant (#match? @constant "^[A-Z]"))
+((identifier) @constant (#lua-match? @constant "^[A-Z]"))
 
 ;; types
 
@@ -56,31 +56,31 @@
 ((stable_identifier (identifier) @namespace))
 
 ((import_declaration
-  path: (identifier) @type) (#match? @type "^[A-Z]"))
-((stable_identifier (identifier) @type) (#match? @type "^[A-Z]"))
+  path: (identifier) @type) (#lua-match? @type "^[A-Z]"))
+((stable_identifier (identifier) @type) (#lua-match? @type "^[A-Z]"))
 
-((import_selectors (identifier) @type) (#match? @type "^[A-Z]"))
+((import_selectors (identifier) @type) (#lua-match? @type "^[A-Z]"))
 
 ; method invocation
 
 
 (call_expression
-  function: (identifier) @function)
+  function: (identifier) @function.call)
 
 (call_expression
   function: (field_expression
-    field: (identifier) @method))
+    field: (identifier) @method.call))
 
 ((call_expression
    function: (identifier) @constructor)
- (#match? @constructor "^[A-Z]"))
+ (#lua-match? @constructor "^[A-Z]"))
 
 (generic_function
-  function: (identifier) @function)
+  function: (identifier) @function.call)
 
 (
   (identifier) @function.builtin
-  (#match? @function.builtin "^super$")
+  (#lua-match? @function.builtin "^super$")
 )
 
 ; function definitions
@@ -96,7 +96,7 @@
 
 (field_expression field: (identifier) @property)
 (field_expression value: (identifier) @type
- (#match? @type "^[A-Z]"))
+ (#lua-match? @type "^[A-Z]"))
 
 (infix_expression operator: (identifier) @operator)
 (infix_expression operator: (operator_identifier) @operator)

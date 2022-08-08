@@ -71,7 +71,10 @@
 ; Constants
 ;----------
 
-[(boolean) (unit)] @constant
+; Don't let normal parens take priority over this
+((unit) @constant.builtin (#set! "priority" 105))
+
+(boolean) @boolean
 
 [(number) (signed_number)] @number
 
@@ -86,7 +89,7 @@
 [
   (conversion_specification)
   (pretty_printing_indication)
-] @punctuation.special
+] @string.special
 
 ; Keywords
 ;---------

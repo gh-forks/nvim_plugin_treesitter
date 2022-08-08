@@ -1,6 +1,5 @@
 [
   (import_declaration)
-  (function_declaration)
   (const_declaration)
   (var_declaration)
   (type_declaration)
@@ -8,17 +7,25 @@
   (func_literal)
   (literal_value)
   (expression_case)
-  (argument_list)
   (default_case)
   (block)
+  (call_expression)
+  (parameter_list)
 ] @indent
 
 [
-  "case"
-  "("
-  ")"
-  "{"
   "}"
 ] @branch
+
+(const_declaration ")" @branch)
+(import_spec_list ")" @branch)
+(var_declaration ")" @branch)
+
+[
+ "}"
+ ")"
+] @indent_end
+
+(parameter_list ")" @branch)
 
 (comment) @ignore

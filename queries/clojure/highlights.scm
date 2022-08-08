@@ -55,7 +55,7 @@
 
 ; Used in destructure pattern
 ((sym_lit) @parameter
- (#match? @parameter "^[&]"))
+ (#lua-match? @parameter "^[&]"))
 
 ; Inline function variables
 ((sym_lit) @variable.builtin
@@ -106,7 +106,10 @@
 
 ; Definition functions
 ((sym_lit) @keyword
- (#match? @keyword "^def.*$"))
+ (#any-of? @keyword
+  "def" "defonce" "defrecord" "defmacro" "definline"
+  "defmulti" "defmethod" "defstruct" "defprotocol"
+  "deftype"))
 ((sym_lit) @keyword
  (#eq? @keyword "declare"))
 ((sym_lit) @keyword.function
@@ -283,7 +286,10 @@
 (list_lit
  .
  (sym_lit) @_keyword ; Don't really want to highlight twice
- (#match? @_keyword "^def.*")
+ (#any-of? @keyword
+   "def" "defonce" "defrecord" "defmacro" "definline"
+   "defmulti" "defmethod" "defstruct" "defprotocol"
+   "deftype")
  .
  (sym_lit)
  .

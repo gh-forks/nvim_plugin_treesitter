@@ -14,6 +14,7 @@ local lockfile = {}
 M.compilers = { vim.fn.getenv "CC", "cc", "gcc", "clang", "cl", "zig" }
 M.prefer_git = fn.has "win32" == 1
 M.command_extra_args = {}
+M.ts_generate_args = nil
 
 local started_commands = 0
 local finished_commands = 0
@@ -79,7 +80,7 @@ local function get_revision(lang)
 end
 
 local function get_installed_revision(lang)
-  local lang_file = utils.join_path(utils.get_parser_info_dir(), lang .. ".revision")
+  local lang_file = utils.join_path(configs.get_parser_info_dir(), lang .. ".revision")
   if vim.fn.filereadable(lang_file) == 1 then
     return vim.fn.readfile(lang_file)[1]
   end
@@ -241,10 +242,14 @@ local function run_install(cache_folder, install_folder, lang, repo, with_sync, 
   if from_local_path then
     compile_location = repo.url
   else
-    local repo_location = string.gsub(repo.location or project_name, "/", path_sep)
-    compile_location = cache_folder .. path_sep .. repo_location
+    local repo_location = project_name
+    if repo.location then
+      repo_location = repo_location .. "/" .. repo.location
+    end
+    repo_location = repo_location:gsub("/", path_sep)
+    compile_location = utils.join_path(cache_folder, repo_location)
   end
-  local parser_lib_name = install_folder .. path_sep .. lang .. ".so"
+  local parser_lib_name = utils.join_path(install_folder, lang) .. ".so"
 
   generate_from_grammar = repo.requires_generate_from_grammar or generate_from_grammar
 
@@ -259,6 +264,15 @@ local function run_install(cache_folder, install_folder, lang, repo, with_sync, 
       )
     end
     return
+  else
+    if not M.ts_generate_args then
+      local ts_cli_version = utils.ts_cli_version()
+      if ts_cli_version and vim.split(ts_cli_version, " ")[1] > "0.20.2" then
+        M.ts_generate_args = { "generate", "--abi", vim.treesitter.language_version }
+      else
+        M.ts_generate_args = { "generate" }
+      end
+    end
   end
   if generate_from_grammar and vim.fn.executable "node" ~= 1 then
     api.nvim_err_writeln "Node JS not found: `node` is not executable!"
@@ -308,26 +322,29 @@ local function run_install(cache_folder, install_folder, lang, repo, with_sync, 
         info = "Generating source files from grammar.js...",
         err = 'Error during "tree-sitter generate"',
         opts = {
-          args = { "generate" },
+          args = M.ts_generate_args,
           cwd = compile_location,
         },
       },
     })
   end
   vim.list_extend(command_list, {
-    {
-      cmd = cc,
-      info = "Compiling...",
-      err = "Error during compilation",
-      opts = {
-        args = vim.tbl_flatten(shell.select_compiler_args(repo, cc)),
-        cwd = compile_location,
-      },
-    },
+    shell.select_compile_command(repo, cc, compile_location),
     shell.select_mv_cmd("parser.so", parser_lib_name, compile_location),
     {
       cmd = function()
-        vim.fn.writefile({ revision or "" }, utils.join_path(utils.get_parser_info_dir(), lang .. ".revision"))
+        vim.fn.writefile({ revision or "" }, utils.join_path(configs.get_parser_info_dir(), lang .. ".revision"))
+      end,
+    },
+    { -- auto-attach modules after installation
+      cmd = function()
+        for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+          if parsers.get_buf_lang(buf) == lang then
+            for _, mod in ipairs(require("nvim-treesitter.configs").available_modules()) do
+              require("nvim-treesitter.configs").reattach_module(mod, buf)
+            end
+          end
+        end
       end,
     },
   })
@@ -379,7 +396,7 @@ local function install(options)
       return api.nvim_err_writeln(err)
     end
 
-    local install_folder, err = utils.get_parser_install_dir()
+    local install_folder, err = configs.get_parser_install_dir()
     if err then
       return api.nvim_err_writeln(err)
     end
@@ -388,9 +405,6 @@ local function install(options)
     local ask
     if ... == "all" then
       languages = parsers.available_parsers()
-      ask = false
-    elseif ... == "maintained" then
-      languages = parsers.maintained_parsers()
       ask = false
     else
       languages = vim.tbl_flatten { ... }
@@ -409,6 +423,18 @@ local function install(options)
       install_lang(lang, ask, cache_folder, install_folder, with_sync, generate_from_grammar)
     end
   end
+end
+
+function M.setup_auto_install()
+  vim.api.nvim_create_autocmd("FileType", {
+    pattern = { "*" },
+    callback = function()
+      local lang = parsers.get_buf_lang()
+      if parsers.get_parser_configs()[lang] and not is_installed(lang) then
+        install() { lang }
+      end
+    end,
+  })
 end
 
 function M.update(options)
@@ -449,32 +475,21 @@ function M.update(options)
 end
 
 function M.uninstall(...)
-  local path_sep = "/"
-  if fn.has "win32" == 1 then
-    path_sep = "\\"
-  end
-
-  if vim.tbl_contains({ "all", "maintained" }, ...) then
+  if vim.tbl_contains({ "all" }, ...) then
     reset_progress_counter()
     local installed = info.installed_parsers()
-    if ... == "maintained" then
-      local maintained = parsers.maintained_parsers()
-      installed = vim.tbl_filter(function(l)
-        return vim.tbl_contains(maintained, l)
-      end, installed)
-    end
     for _, langitem in pairs(installed) do
       M.uninstall(langitem)
     end
   elseif ... then
     local languages = vim.tbl_flatten { ... }
     for _, lang in ipairs(languages) do
-      local install_dir, err = utils.get_parser_install_dir()
+      local install_dir, err = configs.get_parser_install_dir()
       if err then
         return api.nvim_err_writeln(err)
       end
 
-      local parser_lib = install_dir .. path_sep .. lang .. ".so"
+      local parser_lib = utils.join_path(install_dir, lang) .. ".so"
 
       local command_list = {
         shell.select_rm_file_cmd(parser_lib, "Uninstalling parser for " .. lang),
@@ -501,7 +516,17 @@ function M.write_lockfile(verbose, skip_langs)
   for _, v in ipairs(sorted_parsers) do
     if not vim.tbl_contains(skip_langs, v.name) then
       -- I'm sure this can be done in aync way with iter_cmd
-      local sha = vim.split(vim.fn.systemlist("git ls-remote " .. v.parser.install_info.url)[1], "\t")[1]
+      local sha
+      if v.parser.install_info.branch then
+        sha = vim.split(
+          vim.fn.systemlist(
+            "git ls-remote " .. v.parser.install_info.url .. " | grep refs/heads/" .. v.parser.install_info.branch
+          )[1],
+          "\t"
+        )[1]
+      else
+        sha = vim.split(vim.fn.systemlist("git ls-remote " .. v.parser.install_info.url)[1], "\t")[1]
+      end
       lockfile[v.name] = { revision = sha }
       if verbose then
         print(v.name .. ": " .. sha)

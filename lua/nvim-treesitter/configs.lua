@@ -1,4 +1,5 @@
 local api = vim.api
+local luv = vim.loop
 
 local queries = require "nvim-treesitter.query"
 local ts_query = require "vim.treesitter.query"
@@ -12,8 +13,10 @@ local config = {
   modules = {},
   sync_install = false,
   ensure_installed = {},
+  auto_install = false,
   ignore_install = {},
   update_strategy = "lockfile",
+  parser_install_dir = nil,
 }
 -- List of modules that need to be setup on initialization.
 local queued_modules_defs = {}
@@ -22,16 +25,17 @@ local is_initialized = false
 local builtin_modules = {
   highlight = {
     module_path = "nvim-treesitter.highlight",
-    enable = false,
-    disable = { "markdown" }, -- FIXME(vigoux): markdown highlighting breaks everything for now
+    -- @deprecated: use `highlight.set_custom_captures` instead
     custom_captures = {},
-    is_supported = queries.has_highlights,
+    enable = false,
+    is_supported = function(lang)
+      return queries.has_highlights(lang)
+    end,
     additional_vim_regex_highlighting = false,
   },
   incremental_selection = {
     module_path = "nvim-treesitter.incremental_selection",
     enable = false,
-    disable = {},
     keymaps = {
       init_selection = "gnn",
       node_incremental = "grn",
@@ -45,7 +49,6 @@ local builtin_modules = {
   indent = {
     module_path = "nvim-treesitter.indent",
     enable = false,
-    disable = {},
     is_supported = queries.has_indents,
   },
 }
@@ -72,8 +75,22 @@ end
 -- @param bufnr buffer number, defaults to current buffer
 -- @param lang language, defaults to current language
 local function enable_module(mod, bufnr, lang)
-  local bufnr = bufnr or api.nvim_get_current_buf()
-  local lang = lang or parsers.get_buf_lang(bufnr)
+  local module = M.get_module(mod)
+  if not module then
+    return
+  end
+
+  bufnr = bufnr or api.nvim_get_current_buf()
+  lang = lang or parsers.get_buf_lang(bufnr)
+
+  if not module.enable then
+    if module.enabled_buffers then
+      module.enabled_buffers[bufnr] = true
+    else
+      module.enabled_buffers = { [bufnr] = true }
+    end
+  end
+
   M.attach_module(mod, bufnr, lang)
 end
 
@@ -86,8 +103,13 @@ local function enable_mod_conf_autocmd(mod)
     return
   end
 
-  local cmd = string.format("lua require'nvim-treesitter.configs'.reattach_module('%s')", mod)
-  api.nvim_command(string.format("autocmd NvimTreesitter FileType * %s", cmd))
+  api.nvim_create_autocmd("FileType", {
+    group = api.nvim_create_augroup("NvimTreesitter-" .. mod, {}),
+    callback = function()
+      require("nvim-treesitter.configs").reattach_module(mod)
+    end,
+    desc = "Reattach module",
+  })
 
   config_mod.loaded = true
 end
@@ -101,19 +123,28 @@ local function enable_all(mod)
     return
   end
 
+  enable_mod_conf_autocmd(mod)
+  config_mod.enable = true
+  config_mod.enabled_buffers = nil
+
   for _, bufnr in pairs(api.nvim_list_bufs()) do
     enable_module(mod, bufnr)
   end
-
-  enable_mod_conf_autocmd(mod)
-  config_mod.enable = true
 end
 
 -- Disables and detaches the module for a buffer.
 -- @param mod path to module
 -- @param bufnr buffer number, defaults to current buffer
 local function disable_module(mod, bufnr)
-  local bufnr = bufnr or api.nvim_get_current_buf()
+  local module = M.get_module(mod)
+  if not module then
+    return
+  end
+
+  bufnr = bufnr or api.nvim_get_current_buf()
+  if module.enabled_buffers then
+    module.enabled_buffers[bufnr] = false
+  end
   M.detach_module(mod, bufnr)
 end
 
@@ -125,9 +156,7 @@ local function disable_mod_conf_autocmd(mod)
   if not config_mod or not config_mod.loaded then
     return
   end
-  -- TODO(kyazdani): detach the correct autocmd... doesn't work when using %s, cmd.
-  -- This will remove all autocomands!
-  api.nvim_command "autocmd! NvimTreesitter FileType *"
+  api.nvim_clear_autocmds { event = "FileType", group = "NvimTreesitter-" .. mod }
   config_mod.loaded = false
 end
 
@@ -136,16 +165,17 @@ end
 -- @param mod path to module
 local function disable_all(mod)
   local config_mod = M.get_module(mod)
-  if not config_mod or not config_mod.enable then
+  if not config_mod then
     return
   end
+
+  config_mod.enabled_buffers = nil
+  disable_mod_conf_autocmd(mod)
+  config_mod.enable = false
 
   for _, bufnr in pairs(api.nvim_list_bufs()) do
     disable_module(mod, bufnr)
   end
-
-  disable_mod_conf_autocmd(mod)
-  config_mod.enable = false
 end
 
 -- Toggles a module for a buffer
@@ -153,8 +183,8 @@ end
 -- @param bufnr buffer number, defaults to current buffer
 -- @param lang language, defaults to current language
 local function toggle_module(mod, bufnr, lang)
-  local bufnr = bufnr or api.nvim_get_current_buf()
-  local lang = lang or parsers.get_buf_lang(bufnr)
+  bufnr = bufnr or api.nvim_get_current_buf()
+  lang = lang or parsers.get_buf_lang(bufnr)
 
   if attached_buffers_by_module.has(mod, bufnr) then
     disable_module(mod, bufnr)
@@ -183,7 +213,7 @@ end
 -- @param root root configuration table to start at
 -- @param path prefix path
 local function recurse_modules(accumulator, root, path)
-  local root = root or config.modules
+  root = root or config.modules
 
   for name, module in pairs(root) do
     local new_path = path and (path .. "." .. name) or name
@@ -211,29 +241,6 @@ local function config_info(process_function)
       return item
     end
   print(vim.inspect(config, { process = process_function }))
-end
-
-if not vim.ui then
-  vim.ui = {
-    select = function(items, opts, on_choice)
-      vim.validate {
-        items = { items, "table", false },
-        on_choice = { on_choice, "function", false },
-      }
-      opts = opts or {}
-      local choices = { opts.prompt or "Select one of:" }
-      local format_item = opts.format_item or tostring
-      for i, item in pairs(items) do
-        table.insert(choices, string.format("%d: %s", i, format_item(item)))
-      end
-      local choice = vim.fn.inputlist(choices)
-      if choice < 1 or choice > #items then
-        on_choice(nil, nil)
-      else
-        on_choice(items[choice], choice)
-      end
-    end,
-  }
 end
 
 function M.edit_query_file(query_group, lang)
@@ -291,21 +298,21 @@ M.commands = {
       "-complete=custom,nvim_treesitter#available_modules",
     },
   },
-  TSEnableAll = {
+  TSEnable = {
     run = enable_all,
     args = {
       "-nargs=+",
       "-complete=custom,nvim_treesitter#available_modules",
     },
   },
-  TSDisableAll = {
+  TSDisable = {
     run = disable_all,
     args = {
       "-nargs=+",
       "-complete=custom,nvim_treesitter#available_modules",
     },
   },
-  TSToggleAll = {
+  TSToggle = {
     run = toggle_all,
     args = {
       "-nargs=+",
@@ -347,17 +354,23 @@ function M.is_enabled(mod, lang, bufnr)
     return false
   end
 
-  if not module_config.enable or not module_config.is_supported(lang) then
+  local buffer_enabled = module_config.enabled_buffers and module_config.enabled_buffers[bufnr]
+  local config_enabled = module_config.enable or buffer_enabled
+  if not config_enabled or not module_config.is_supported(lang) then
     return false
   end
 
-  if module_config.cond and not module_config.cond(lang, bufnr) then
-    return false
-  end
-
-  for _, parser in pairs(module_config.disable) do
-    if lang == parser then
+  local disable = module_config.disable
+  if type(disable) == "function" then
+    if disable(lang, bufnr) then
       return false
+    end
+  elseif type(disable) == "table" then
+    -- Otherwise it's a list of languages
+    for _, parser in pairs(disable) do
+      if lang == parser then
+        return false
+      end
     end
   end
 
@@ -369,6 +382,15 @@ end
 function M.setup(user_data)
   config.modules = vim.tbl_deep_extend("force", config.modules, user_data)
   config.ignore_install = user_data.ignore_install or {}
+  config.parser_install_dir = user_data.parser_install_dir or nil
+  if config.parser_install_dir then
+    config.parser_install_dir = vim.fn.expand(config.parser_install_dir, ":p")
+  end
+
+  config.auto_install = user_data.auto_install or false
+  if config.auto_install then
+    require("nvim-treesitter.install").setup_auto_install()
+  end
 
   local ensure_installed = user_data.ensure_installed or {}
   if #ensure_installed > 0 then
@@ -446,8 +468,8 @@ end
 -- @param bufnr the bufnr
 -- @param lang the language of the buffer
 function M.attach_module(mod_name, bufnr, lang)
-  local bufnr = bufnr or api.nvim_get_current_buf()
-  local lang = lang or parsers.get_buf_lang(bufnr)
+  bufnr = bufnr or api.nvim_get_current_buf()
+  lang = lang or parsers.get_buf_lang(bufnr)
   local resolved_mod = resolve_module(mod_name)
 
   if resolved_mod and not attached_buffers_by_module.has(mod_name, bufnr) and M.is_enabled(mod_name, lang, bufnr) then
@@ -461,7 +483,7 @@ end
 -- @param bufnr the bufnr
 function M.detach_module(mod_name, bufnr)
   local resolved_mod = resolve_module(mod_name)
-  local bufnr = bufnr or api.nvim_get_current_buf()
+  bufnr = bufnr or api.nvim_get_current_buf()
 
   if resolved_mod and attached_buffers_by_module.has(mod_name, bufnr) then
     attached_buffers_by_module.remove(mod_name, bufnr)
@@ -516,6 +538,45 @@ function M.init()
   for _, mod_def in ipairs(queued_modules_defs) do
     M.define_modules(mod_def)
   end
+end
+
+-- If parser_install_dir is not nil is used or created.
+-- If parser_install_dir is nil try the package dir of the nvim-treesitter
+-- plugin first, followed by the "site" dir from "runtimepath". "site" dir will
+-- be created if it doesn't exist. Using only the package dir won't work when
+-- the plugin is installed with Nix, since the "/nix/store" is read-only.
+function M.get_parser_install_dir(folder_name)
+  folder_name = folder_name or "parser"
+
+  if config.parser_install_dir then
+    local parser_dir = utils.join_path(config.parser_install_dir, folder_name)
+    return utils.create_or_reuse_writable_dir(
+      parser_dir,
+      utils.join_space("Could not create parser dir '", parser_dir, "': "),
+      utils.join_space("Parser dir '", parser_dir, "' should be read/write.")
+    )
+  end
+
+  local package_path = utils.get_package_path()
+  local package_path_parser_dir = utils.join_path(package_path, folder_name)
+
+  -- If package_path is read/write, use that
+  if luv.fs_access(package_path_parser_dir, "RW") then
+    return package_path_parser_dir
+  end
+
+  local site_dir = utils.get_site_dir()
+  local parser_dir = utils.join_path(site_dir, folder_name)
+
+  return utils.create_or_reuse_writable_dir(
+    parser_dir,
+    nil,
+    utils.join_space("Invalid rights,", package_path, "or", parser_dir, "should be read/write")
+  )
+end
+
+function M.get_parser_info_dir(parser_install_dir)
+  return M.get_parser_install_dir "parser-info"
 end
 
 function M.get_update_strategy()

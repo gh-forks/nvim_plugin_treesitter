@@ -5,10 +5,14 @@
 [
  "("
  ")"
+ "(("
+ "))"
  "{"
  "}"
  "["
  "]"
+ "[["
+ "]]"
  ] @punctuation.bracket
 
 [
@@ -23,7 +27,9 @@
 
 [
  ">"
+ ">>"
  "<"
+ "<<"
  "&"
  "&&"
  "|"
@@ -84,16 +90,19 @@
 (command_substitution
   [ "$(" ")" ] @punctuation.bracket)
 
+(process_substitution
+  [ "<(" ")" ] @punctuation.bracket)
+
 
 (function_definition
   name: (word) @function)
 
-(command_name (word) @function)
+(command_name (word) @function.call)
 
 ((command_name (word) @function.builtin)
  (#any-of? @function.builtin
-    "cd" "echo" "eval" "exit" "getopts"
-    "pushd" "popd" "return" "set" "shift"))
+    "alias" "cd" "clear" "echo" "eval" "exit" "getopts" "popd"
+    "pushd" "return" "set" "shift" "shopt" "source" "test"))
 
 (command
   argument: [
@@ -102,7 +111,7 @@
              ])
 
 ((word) @number
-  (#match? @number "^[0-9]+$"))
+  (#lua-match? @number "^[0-9]+$"))
 
 (file_redirect
   descriptor: (file_descriptor) @operator
@@ -114,7 +123,7 @@
 (variable_name) @variable
 
 ((variable_name) @constant
- (#match? @constant "^[A-Z][A-Z_0-9]*$"))
+ (#lua-match? @constant "^[A-Z][A-Z_0-9]*$"))
 
 (case_item
   value: (word) @parameter)
